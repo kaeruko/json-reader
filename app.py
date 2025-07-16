@@ -1,67 +1,79 @@
-import os
-import json
+from flask import Flask, request, render_template_string, send_file
 from datetime import datetime
-from flask import Flask, request, jsonify
+import json
+import io
 
 app = Flask(__name__)
 
-@app.route('/extract_threads', methods=['POST'])
-def extract_threads():
-    data = request.get_json()
+HTML_TEMPLATE = """
+<!doctype html>
+<title>スレッド抽出ツール</title>
+<h1>JSONファイルをアップロードしてスレッドをまとめて抽出</h1>
+<form method="POST" enctype="multipart/form-data">
+    <input type="file" name="file" accept=".json" required>
+    <input type="submit" value="抽出してダウンロード">
+</form>
+"""
 
-    json_path = data.get('json_path')
-    output_dir = data.get('output_dir', '/Users/yokota/Desktop/gpt/logs/')
+@app.route("/", methods=["GET", "POST"])
+def index():
+    if request.method == "POST":
+        uploaded_file = request.files.get("file")
+        if not uploaded_file:
+            return "ファイルが見つかりませんでした", 400
 
-    if not json_path or not os.path.isfile(json_path):
-        return jsonify({'error': f"ファイル '{json_path}' が見つかりません。"}), 400
+        try:
+            conversations = json.load(uploaded_file)
+            output = io.StringIO()
 
-    os.makedirs(output_dir, exist_ok=True)
+            for idx, conv in enumerate(conversations):
+                title = conv.get("title", f"untitled_{idx}")
+                safe_title = ''.join(c if c not in '/:*?"<>|' else '_' for c in title)
+                if len(safe_title) < 3:
+                    safe_title = f"thread_{idx}_{safe_title}"
 
-    with open(json_path, 'r', encoding='utf-8') as f:
-        conversations = json.load(f)
+                header = (
+                    f"# 作成日: {datetime.today().strftime('%Y-%m-%d')}\n"
+                    f"# 会話スレッド: {title}\n"
+                    f"# 抽出日時: {datetime.now()}\n\n"
+                )
+                output.write(header)
 
-    titles = [conv.get('title', 'untitled') for conv in conversations]
+                messages = conv.get("mapping", {})
+                for node in messages.values():
+                    msg = node.get("message")
+                    if not msg:
+                        continue
 
-    for idx, conv in enumerate(conversations):
-        title = titles[idx]
-        safe_title = ''.join(c if c not in '/:*?"<>|' else '_' for c in title)
-        if len(safe_title) < 3:
-            safe_title = f"thread_{idx}_{safe_title}"
+                    content = msg.get("content", {})
+                    parts = content.get("parts", [])
+                    if not parts or not parts[0] or content.get("content_type") != "text":
+                        continue
 
-        output_file = os.path.join(output_dir, f"{idx}_{safe_title}.txt")
+                    role = msg.get("author", {}).get("role", "unknown")
+                    prefix = "User: " if role == "user" else "Assistant: "
+                    time = msg.get("create_time")
+                    if time:
+                        timestamp = datetime.fromtimestamp(time).isoformat()
+                        output.write(f"[{timestamp}] {prefix}\"{parts[0]}\"\n")
+                    else:
+                        output.write(f"{prefix}\"{parts[0]}\"\n")
 
-        header = (
-            f"# 作成日: {datetime.today().strftime('%Y-%m-%d')}\n"
-            f"# 会話スレッド: {title}\n"
-            f"# 抽出日時: {datetime.now()}\n"
-            f"# 抽出元: {json_path}\n\n"
-        )
+                output.write("\n" + "="*40 + "\n\n")
 
-        with open(output_file, 'w', encoding='utf-8') as out:
-            out.write(header)
+            # まとめた内容をファイルとして返す
+            output.seek(0)
+            return send_file(
+                io.BytesIO(output.getvalue().encode("utf-8")),
+                mimetype="text/plain",
+                as_attachment=True,
+                download_name="extracted_threads.txt"
+            )
 
-            messages = conv.get('mapping', {})
-            for node in messages.values():
-                msg = node.get('message')
-                if not msg:
-                    continue
+        except Exception as e:
+            return f"エラーが発生しました: {str(e)}", 500
 
-                content = msg.get('content', {})
-                parts = content.get('parts', [])
-                if not parts or not parts[0] or content.get('content_type') != 'text':
-                    continue
+    return render_template_string(HTML_TEMPLATE)
 
-                role = msg.get('author', {}).get('role', 'unknown')
-                time = msg.get('create_time')
-                prefix = 'User: ' if role == 'user' else 'Assistant: '
-
-                if time:
-                    timestamp = datetime.fromtimestamp(time).isoformat()
-                    out.write(f"[{timestamp}] {prefix}\"{parts[0]}\"\n")
-                else:
-                    out.write(f"{prefix}\"{parts[0]}\"\n")
-
-    return jsonify({'message': f"{len(titles)} 個のスレッドを {output_dir} に抽出しました。"})
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     app.run(debug=True)
