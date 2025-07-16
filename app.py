@@ -1,22 +1,35 @@
-from flask import Flask, request, render_template_string, send_file
+from flask import Flask, request, render_template_string
 from datetime import datetime
 import json
 import io
+import html
 
 app = Flask(__name__)
 
 HTML_TEMPLATE = """
 <!doctype html>
-<title>スレッド抽出ツール</title>
-<h1>JSONファイルをアップロードしてスレッドをまとめて抽出</h1>
+<title>ChatGPTのログを表示する</title>
+<h1>conversations.jsonをアップロード</h1>
 <form method="POST" enctype="multipart/form-data">
     <input type="file" name="file" accept=".json" required>
-    <input type="submit" value="抽出してダウンロード">
+    <input type="submit" value="表示">
 </form>
+
+{% if threads %}
+  <hr>
+  <h2>抽出されたスレッド:</h2>
+  {% for thread in threads %}
+    <div style="border:1px solid #ccc; padding:10px; margin-bottom:20px;">
+      <h3>{{ thread.title }}</h3>
+      <pre style="white-space: pre-wrap; font-family: monospace;">{{ thread.content }}</pre>
+    </div>
+  {% endfor %}
+{% endif %}
 """
 
 @app.route("/", methods=["GET", "POST"])
 def index():
+    threads = []
     if request.method == "POST":
         uploaded_file = request.files.get("file")
         if not uploaded_file:
@@ -24,22 +37,12 @@ def index():
 
         try:
             conversations = json.load(uploaded_file)
-            output = io.StringIO()
 
             for idx, conv in enumerate(conversations):
                 title = conv.get("title", f"untitled_{idx}")
-                safe_title = ''.join(c if c not in '/:*?"<>|' else '_' for c in title)
-                if len(safe_title) < 3:
-                    safe_title = f"thread_{idx}_{safe_title}"
-
-                header = (
-                    f"# 作成日: {datetime.today().strftime('%Y-%m-%d')}\n"
-                    f"# 会話スレッド: {title}\n"
-                    f"# 抽出日時: {datetime.now()}\n\n"
-                )
-                output.write(header)
-
                 messages = conv.get("mapping", {})
+                thread_text = ""
+
                 for node in messages.values():
                     msg = node.get("message")
                     if not msg:
@@ -51,29 +54,23 @@ def index():
                         continue
 
                     role = msg.get("author", {}).get("role", "unknown")
-                    prefix = "User: " if role == "user" else "Assistant: "
+                    prefix = "**User**: " if role == "user" else "**Assistant**: "
                     time = msg.get("create_time")
                     if time:
                         timestamp = datetime.fromtimestamp(time).isoformat()
-                        output.write(f"[{timestamp}] {prefix}\"{parts[0]}\"\n")
+                        thread_text += f"- [{timestamp}] {prefix}{parts[0]}\n"
                     else:
-                        output.write(f"{prefix}\"{parts[0]}\"\n")
+                        thread_text += f"- {prefix}{parts[0]}\n"
 
-                output.write("\n" + "="*40 + "\n\n")
-
-            # まとめた内容をファイルとして返す
-            output.seek(0)
-            return send_file(
-                io.BytesIO(output.getvalue().encode("utf-8")),
-                mimetype="text/plain",
-                as_attachment=True,
-                download_name="extracted_threads.txt"
-            )
+                threads.append({
+                    "title": html.escape(title),
+                    "content": html.escape(thread_text)
+                })
 
         except Exception as e:
-            return f"エラーが発生しました: {str(e)}", 500
+            threads = [{"title": "エラー", "content": str(e)}]
 
-    return render_template_string(HTML_TEMPLATE)
+    return render_template_string(HTML_TEMPLATE, threads=threads)
 
 if __name__ == "__main__":
     app.run(debug=True)
